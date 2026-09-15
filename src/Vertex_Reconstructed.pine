@@ -1,0 +1,123 @@
+//@version=6
+indicator("Vertex Reconstructed [Excel Matched]", shorttitle="Vertex Rebuilt", overlay=false, precision=2)
+
+// Clean-room reconstruction from user-provided output data. No protected
+// source code was accessed. With the default settings, the four plotted
+// series match the supplied 13,303-row Excel export to its 2-decimal precision.
+
+const string GROUP_CALC = "Calculation"
+const string GROUP_BANDS = "Vertex bands"
+const string GROUP_LEVELS = "Levels"
+const string GROUP_SIGNALS = "Signals and alerts"
+
+int controlPeriod = input.int(14, "Control_Period", minval=1, group=GROUP_CALC)
+int signalPeriod = input.int(5, "Signal_Period", minval=1, group=GROUP_CALC)
+string signalMethod = input.string("SMA", "Signal_Method", options=["SMA", "EMA", "RMA", "WMA"], group=GROUP_CALC)
+bool matchExport = input.bool(true, "Match exported Vertex (one-bar delay)", tooltip="Uses only completed bars [1..length]. This matches the supplied Excel export and prevents intrabar changes.", group=GROUP_CALC)
+
+int bbUpPeriod = input.int(12, "BB_Up_Period", minval=1, group=GROUP_BANDS)
+float bbUpDeviation = input.float(2.0, "BB_Up_Deviation", minval=0.0, step=0.1, group=GROUP_BANDS)
+int bbDownPeriod = input.int(12, "BB_Dn_Period", minval=1, group=GROUP_BANDS)
+float bbDownDeviation = input.float(2.0, "BB_Dn_Deviation", minval=0.0, step=0.1, group=GROUP_BANDS)
+
+float levelOb = input.float(6.0, "LevelOb", step=0.1, group=GROUP_LEVELS)
+float levelOs = input.float(-6.0, "LevelOs", step=0.1, group=GROUP_LEVELS)
+float extremeLevelOb = input.float(10.0, "ExtremelevelOb", step=0.1, group=GROUP_LEVELS)
+float extremeLevelOs = input.float(-10.0, "ExtremelevelOs", step=0.1, group=GROUP_LEVELS)
+
+bool showReversalMarkers = input.bool(true, "Show armed reversal markers", group=GROUP_SIGNALS)
+bool alertsOnClosedBars = input.bool(true, "Trigger signals only on bar close", group=GROUP_SIGNALS)
+
+// Walk from the newest selected bar to the oldest. Add close to the upward
+// accumulator whenever high makes a new running high. Add close to the
+// downward accumulator whenever low makes a new running low.
+f_vertex(int length, bool usePreviousBar) =>
+    int startOffset = usePreviousBar ? 1 : 0
+    float runningHigh = na
+    float runningLow = na
+    float upSum = 0.0
+    float downSum = 0.0
+    int barsUsed = 0
+
+    for step = 0 to length - 1
+        int offset = startOffset + step
+        if not na(close[offset])
+            barsUsed += 1
+            if na(runningHigh) or high[offset] > runningHigh
+                runningHigh := high[offset]
+                upSum += close[offset]
+            if na(runningLow) or low[offset] < runningLow
+                runningLow := low[offset]
+                downSum += close[offset]
+
+    barsUsed == 0 ? 0.0 : upSum != 0.0 and downSum != 0.0 ? downSum / upSum - upSum / downSum : na
+
+f_ma(float src, int length, string method) =>
+    switch method
+        "EMA" => ta.ema(src, length)
+        "RMA" => ta.rma(src, length)
+        "WMA" => ta.wma(src, length)
+        => ta.sma(src, length)
+
+// Population standard deviation, matching the supplied band values.
+f_population_stdev(float src, int length, float mean) =>
+    float meanSquare = ta.sma(src * src, length)
+    math.sqrt(math.max(meanSquare - mean * mean, 0.0))
+
+float control = f_vertex(controlPeriod, matchExport)
+float signal = f_ma(control, signalPeriod, signalMethod)
+
+float upperBasis = ta.sma(control, bbUpPeriod)
+float lowerBasis = ta.sma(control, bbDownPeriod)
+float upperBand = upperBasis + bbUpDeviation * f_population_stdev(control, bbUpPeriod, upperBasis)
+float lowerBand = lowerBasis - bbDownDeviation * f_population_stdev(control, bbDownPeriod, lowerBasis)
+
+plot(control, "Control Period", color=color.rgb(255, 82, 82), linewidth=2)
+plot(signal, "Signal Period", color=color.rgb(33, 150, 243), linewidth=2)
+plot(upperBand, "Upper BB of Vertex", color=color.rgb(128, 128, 128), linewidth=1)
+plot(lowerBand, "Lower BB of Vertex", color=color.rgb(128, 128, 128), linewidth=1)
+
+hline(levelOb, "Level OB", color=color.new(color.purple, 45), linestyle=hline.style_dotted)
+hline(levelOs, "Level OS", color=color.new(color.purple, 45), linestyle=hline.style_dotted)
+hline(extremeLevelOb, "Extreme Level OB", color=color.rgb(156, 39, 176), linestyle=hline.style_dotted)
+hline(extremeLevelOs, "Extreme Level OS", color=color.rgb(156, 39, 176), linestyle=hline.style_dotted)
+hline(0.0, "Zero", color=color.new(color.gray, 75))
+
+// Optional, strategy-ready reversal confirmations. A side is armed after
+// control reaches its band/level, then confirms on a control/signal cross.
+bool inLongZone = control <= lowerBand or control <= levelOs
+bool inShortZone = control >= upperBand or control >= levelOb
+var bool longArmed = false
+var bool shortArmed = false
+
+if inLongZone
+    longArmed := true
+if inShortZone
+    shortArmed := true
+
+bool confirmationGate = not alertsOnClosedBars or barstate.isconfirmed
+bool bullishCross = ta.crossover(control, signal) and confirmationGate
+bool bearishCross = ta.crossunder(control, signal) and confirmationGate
+bool longReversal = longArmed and bullishCross
+bool shortReversal = shortArmed and bearishCross
+
+if longReversal
+    longArmed := false
+    shortArmed := false
+if shortReversal
+    shortArmed := false
+    longArmed := false
+
+plotshape(showReversalMarkers and longReversal, title="Bullish Vertex Reversal", style=shape.triangleup, location=location.bottom, color=color.lime, size=size.tiny, text="L")
+plotshape(showReversalMarkers and shortReversal, title="Bearish Vertex Reversal", style=shape.triangledown, location=location.top, color=color.red, size=size.tiny, text="S")
+
+// Numeric flags are available in TradingView's Data Window and to alerts.
+plot(longReversal ? 1.0 : 0.0, "Long Reversal Flag", color=color.new(color.lime, 100), display=display.data_window)
+plot(shortReversal ? -1.0 : 0.0, "Short Reversal Flag", color=color.new(color.red, 100), display=display.data_window)
+
+alertcondition(longReversal, "Vertex bullish reversal", "Vertex bullish reversal on {{ticker}} {{interval}}")
+alertcondition(shortReversal, "Vertex bearish reversal", "Vertex bearish reversal on {{ticker}} {{interval}}")
+alertcondition(bullishCross, "Control crossed above signal", "Vertex control crossed above signal on {{ticker}} {{interval}}")
+alertcondition(bearishCross, "Control crossed below signal", "Vertex control crossed below signal on {{ticker}} {{interval}}")
+alertcondition(ta.crossover(control, extremeLevelOb), "Entered extreme overbought", "Vertex entered extreme overbought on {{ticker}} {{interval}}")
+alertcondition(ta.crossunder(control, extremeLevelOs), "Entered extreme oversold", "Vertex entered extreme oversold on {{ticker}} {{interval}}")
